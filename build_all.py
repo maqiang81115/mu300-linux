@@ -120,6 +120,14 @@ ARGON_DIRS = sorted({
 PATCH_ANCHOR = b'openwrt:openwrt::mu300-openwrt-rootfs.tar.gz) ;;'
 PATCH_LINE = b'openwrt-luci:openwrt-luci::mu300-openwrt-luci-rootfs.tar.gz) ;;'
 
+# 补丁：android-boot-image.sh _vendor_overlay 固件目录分支加 openwrt-luci（OpenWrt 结构，固件在 lib/firmware）
+PATCH_FW_ANCHOR = b'openwrt) _fw=lib/firmware ;; *) return 1 ;; esac'
+PATCH_FW_LINE = b'openwrt) _fw=lib/firmware ;; openwrt-luci) _fw=lib/firmware ;; *) return 1 ;; esac'
+
+# 补丁：install.sh need_for 空间判断加 openwrt-luci（单系统，按 NEED_OPENWRT 算）
+PATCH_NEED_ANCHOR = b'openwrt) echo $NEED_OPENWRT ;; ubuntu) echo $NEED_UBUNTU ;; *) echo $NEED_BOTH ;; esac'
+PATCH_NEED_LINE = b'openwrt) echo $NEED_OPENWRT ;; openwrt-luci) echo $NEED_OPENWRT ;; ubuntu) echo $NEED_UBUNTU ;; *) echo $NEED_BOTH ;; esac'
+
 TF_CONF = (
     '# TF card deployment build (mu300-magisk-*-tf.zip):\n'
     '# installs Linux to the SD card and formats it (everything on the card is erased).\n'
@@ -261,17 +269,38 @@ def ensure_source(tag):
 
 
 def patch_installer(src_dir):
-    """幂等打 openwrt-luci 白名单补丁，返回补丁后的 install.sh 内容(bytes)。"""
+    """幂等打 openwrt-luci 补丁：
+    1) install.sh manifest_load 白名单加 openwrt-luci 行
+    2) install.sh need_for 空间判断认 openwrt-luci（单系统）
+    3) android-boot-image.sh _vendor_overlay 固件目录认 openwrt-luci
+    返回 (install.sh bytes, android-boot-image.sh bytes)。"""
     p = src_dir / 'android' / 'magisk' / 'installer' / 'mu300-install.sh'
     data = p.read_bytes()
     if PATCH_LINE in data:
-        log('补丁已存在（幂等跳过）')
+        log('白名单补丁已存在（幂等跳过）')
     elif PATCH_ANCHOR not in data:
         sys.exit('补丁锚点未找到，源码结构可能已变化，请人工检查 mu300-install.sh')
     else:
         data = data.replace(PATCH_ANCHOR, PATCH_LINE + b'\n' + PATCH_ANCHOR, 1)
         log('已打 openwrt-luci 白名单补丁')
-    return data
+    if PATCH_NEED_LINE in data:
+        log('need_for 补丁已存在（幂等跳过）')
+    elif PATCH_NEED_ANCHOR not in data:
+        sys.exit('need_for 锚点未找到，源码结构可能已变化，请人工检查 mu300-install.sh')
+    else:
+        data = data.replace(PATCH_NEED_ANCHOR, PATCH_NEED_LINE, 1)
+        log('已打 need_for 空间判断补丁')
+
+    abi = src_dir / 'tools' / 'android-boot-image.sh'
+    ab = abi.read_bytes()
+    if PATCH_FW_LINE in ab:
+        log('android-boot-image 补丁已存在（幂等跳过）')
+    elif PATCH_FW_ANCHOR not in ab:
+        sys.exit('android-boot-image 锚点未找到，源码结构可能已变化，请人工检查 android-boot-image.sh')
+    else:
+        ab = ab.replace(PATCH_FW_ANCHOR, PATCH_FW_LINE, 1)
+        log('已打 android-boot-image 固件目录补丁')
+    return data, ab
 
 
 # ---------------- argon ipk 处理 ----------------
@@ -456,7 +485,8 @@ def make_stage(tag, code, rel_dir, src_dir, rootfs_payload, tf=False):
     shutil.copyfile(M / 'switch.sh', st / 'switch.sh')
     shutil.copyfile(M / 'system' / 'bin' / 'mu300-linux', st / 'system' / 'bin' / 'mu300-linux')
     shutil.copyfile(I / 'mu300-install.sh.patched', st / 'mu300' / 'install.sh')
-    for f in ('android-boot-image.sh', 'android-install.sh', 'android-mount-mu300root.sh', 'storage.sh', 'i18n.sh'):
+    shutil.copyfile(T / 'android-boot-image.sh.patched', st / 'mu300' / 'android-boot-image.sh')
+    for f in ('android-install.sh', 'android-mount-mu300root.sh', 'storage.sh', 'i18n.sh'):
         shutil.copyfile(T / f, st / 'mu300' / f)
     shutil.copyfile(src_dir / 'rootfs' / 'overlay' / 'opt' / 'mu300' / 'bin' / 'mu300-update', st / 'mu300' / 'mu300-update')
     shutil.copyfile(src_dir / 'i18n' / 'tr.tsv', st / 'mu300' / 'i18n' / 'tr.tsv')
@@ -511,9 +541,15 @@ def audit(zip_path, tf=False):
             if z.getinfo(p).compress_type != zipfile.ZIP_STORED:
                 sys.exit(f'审计失败: payload {p} 被压缩')
         manifest = z.read('mu300/manifest').decode()
-        if 'openwrt-luci' not in z.read('mu300/install.sh').decode(errors='replace'):
+        ins = z.read('mu300/install.sh').decode(errors='replace')
+        abi = z.read('mu300/android-boot-image.sh').decode(errors='replace')
+        if 'openwrt-luci' not in ins:
             sys.exit('审计失败: install.sh 缺 openwrt-luci 白名单')
-    log(f'审计通过: {zip_path.name} ({len(want)} 条目, payload store, 白名单 OK)')
+        if PATCH_NEED_LINE.decode() not in ins:
+            sys.exit('审计失败: install.sh need_for 缺 openwrt-luci 分支')
+        if PATCH_FW_LINE.decode() not in abi:
+            sys.exit('审计失败: android-boot-image.sh 缺 openwrt-luci 固件目录分支')
+    log(f'审计通过: {zip_path.name} ({len(want)} 条目, payload store, 白名单/need_for/android-boot-image OK)')
 
 
 def main():
@@ -560,9 +596,10 @@ def build_once(args, tag, published):
         src_dir = existing[0] if existing else Path(r'C:\Users\Administrator\Doubao\chats\2026-10-04\new-chat\mu300-linux-main')
         log(f'复用源码: {src_dir}')
 
-    # 补丁安装器
-    patched = patch_installer(src_dir)
-    (src_dir / 'android' / 'magisk' / 'installer' / 'mu300-install.sh.patched').write_bytes(patched)
+    # 补丁安装器（白名单 + need_for + android-boot-image）
+    patched_i, patched_abi = patch_installer(src_dir)
+    (src_dir / 'android' / 'magisk' / 'installer' / 'mu300-install.sh.patched').write_bytes(patched_i)
+    (src_dir / 'tools' / 'android-boot-image.sh.patched').write_bytes(patched_abi)
 
     # argon 集成 rootfs
     argon_files, argon_dirs = ensure_argon()
