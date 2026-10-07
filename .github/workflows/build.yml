@@ -26,17 +26,21 @@ jobs:
           echo "upstream latest: ${tag}"
 
       - name: Skip if already built
+        id: check
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${{ steps.tag.outputs.tag }}"
           if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             echo "already built ${tag}, skip (follow upstream: build only on new version)"
-            exit 0
+            echo "should_skip=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "new version ${tag}, start cloud build"
+            echo "should_skip=false" >> "${GITHUB_OUTPUT}"
           fi
-          echo "new version ${tag}, start cloud build"
 
       - name: Run builder
+        if: steps.check.outputs.should_skip != 'true'
         env:
           MU300_PROXY: ''
         run: |
@@ -44,6 +48,7 @@ jobs:
           find work/out -name '*.zip' -o -name 'SHA256SUMS-magisk' | sort
 
       - name: Upload artifacts
+        if: steps.check.outputs.should_skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: mu300-magisk-${{ steps.tag.outputs.tag }}
@@ -53,6 +58,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish release
+        if: steps.check.outputs.should_skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
