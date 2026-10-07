@@ -75,46 +75,32 @@ COMMON = [
 ]
 PAYLOAD = ['payload/' + KERNEL_ASSET, 'payload/' + ROOTFS_ASSET]
 
-# argon ipk 内需要集成的文件（相对 ipk data.tar.gz 根）
-ARGON_FILES = [
-    'etc/uci-defaults/30_luci-theme-argon',
-    'usr/libexec/rpcd/luci.argon_wallpaper',
-    'usr/share/rpcd/acl.d/luci-theme-argon.json',
-    'usr/share/ucode/luci/template/themes/argon/footer.ut',
-    'usr/share/ucode/luci/template/themes/argon/footer_login.ut',
-    'usr/share/ucode/luci/template/themes/argon/header.ut',
-    'usr/share/ucode/luci/template/themes/argon/header_login.ut',
-    'usr/share/ucode/luci/template/themes/argon/head_meta.ut',
-    'usr/share/ucode/luci/template/themes/argon/out_header_login.ut',
-    'usr/share/ucode/luci/template/themes/argon/sysauth.ut',
-    'www/luci-static/argon/favicon.ico',
-    'www/luci-static/argon/background/README.md',
-    'www/luci-static/argon/css/cascade.css',
-    'www/luci-static/argon/css/dark.css',
-    'www/luci-static/argon/fonts/argon.woff',
-    'www/luci-static/argon/fonts/argon.woff2',
-    'www/luci-static/argon/fonts/GoogleSans-Regular.woff',
-    'www/luci-static/argon/fonts/GoogleSans-Regular.woff2',
-    'www/luci-static/argon/fonts/TypoGraphica.woff',
-    'www/luci-static/argon/fonts/TypoGraphica.woff2',
-    'www/luci-static/argon/icon/android-icon-192x192.png',
-    'www/luci-static/argon/icon/apple-icon-144x144.png',
-    'www/luci-static/argon/icon/arrow.svg',
-    'www/luci-static/argon/icon/favicon-16x16.png',
-    'www/luci-static/argon/icon/favicon-32x32.png',
-    'www/luci-static/argon/icon/manifest.json',
-    'www/luci-static/argon/icon/spinner.svg',
-    'www/luci-static/argon/img/argon.svg',
-    'www/luci-static/argon/img/bg1.jpg',
-    'www/luci-static/argon/img/blank.png',
-    'www/luci-static/argon/img/volume_high.svg',
-    'www/luci-static/argon/img/volume_off.svg',
-    'www/luci-static/resources/menu-argon.js',
+# argon 主题以 apk 注册方式集成（可随 apk upgrade 更新，仿官方 OpenWrt 源打包）
+# 素材目录：build_all.py 同目录 argon-apk/（离线固定素材，避免在线下载不稳定）
+ARGON_APK_DIR = HERE / 'argon-apk'
+ARGON_APKS = [
+    'luci-theme-argon-2.4.7-r1.apk',
+    'luci-app-argon-config-2.4.7-r1.apk',
+    'luci-i18n-argon-config-zh-cn-26.103.13761.3e099a3.apk',
 ]
-# argon ipk 内的目录（保证父目录存在）
-ARGON_DIRS = sorted({
-    '/'.join(f.split('/')[:-1]) for f in ARGON_FILES
-})
+ARGON_FIRSTBOOT = '95-mu300-argon'
+# 首启脚本：离线安装 argon apk；用 uci 标记保证更新后不覆盖用户主题选择
+ARGON_FIRSTBOOT_CONTENT = b'''#!/bin/sh
+# Argon theme (jerrykuku/luci-theme-argon v2.4.7), installed offline from the bundled apk packages.
+# First install: install apk + point default theme to argon. On updates (fresh rootfs, kept /etc/config)
+# the theme files are reinstalled, and the user's own theme choice is never overwritten.
+[ -d /www/luci-static/argon ] || apk add --allow-untrusted --no-network /usr/share/mu300-argon/*.apk >/tmp/mu300-argon.log 2>&1
+[ -d /www/luci-static/argon ] || exit 0
+if [ "$(uci -q get luci.mu300.argon)" != 1 ]; then
+    uci -q batch <<UCI
+set luci.main.mediaurlbase='/luci-static/argon'
+set luci.mu300=mu300
+set luci.mu300.argon='1'
+UCI
+    uci commit luci
+fi
+exit 0
+'''
 
 # 补丁：官方安装器 manifest_load 白名单加 openwrt-luci 行
 PATCH_ANCHOR = b'openwrt:openwrt::mu300-openwrt-rootfs.tar.gz) ;;'
@@ -368,41 +354,20 @@ def unpack_ipk(ipk_path):
 
 
 def ensure_argon():
-    """获取最新 argon ipk 并解包，返回 (files, dirs)。离线 fallback 到 build/luci-theme-argon_2.4.7_all.ipk。"""
-    ARGON.mkdir(parents=True, exist_ok=True)
-    ipk = None
-    try:
-        atag = github_latest_tag(ARGON_REPO)
-        names = release_asset_names(ARGON_REPO, atag)
-        ipk_names = [n for n in names if n.endswith('.ipk')]
-        theme_ipks = [n for n in ipk_names if n.startswith('luci-theme-argon')]
-        pick = theme_ipks[0] if theme_ipks else (ipk_names[0] if ipk_names else None)
-        if not pick:
-            raise RuntimeError(f'argon release {atag} 没有 .ipk 资产: {names}')
-        ipk = ARGON / pick
-        if not ipk.exists():
-            url = release_asset_url(ARGON_REPO, atag, pick)
-            log(f'下载 argon 主题 {atag}: {pick}')
-            http_download(url, ipk)
-        else:
-            log(f'argon ipk 已存在: {ipk.name}')
-    except Exception as e:
-        fallback = HERE.parent / 'build' / 'luci-theme-argon_2.4.7_all.ipk'
-        if fallback.exists():
-            log(f'在线获取 argon 失败({e})，使用本地缓存 {fallback.name}')
-            ipk = fallback
-        else:
-            sys.exit('argon 获取失败且无本地缓存')
-    files, dirs = unpack_ipk(ipk)
-    missing = [f for f in ARGON_FILES if f not in files]
+    """检查本地 argon apk 素材（离线固定素材，3 个 apk + 首启脚本）。"""
+    missing = [n for n in ARGON_APKS + [ARGON_FIRSTBOOT]
+               if not (ARGON_APK_DIR / n).exists()]
     if missing:
-        sys.exit(f'argon ipk 缺少预期文件: {missing}')
-    log(f'argon 就绪: {len(files)} 文件')
-    return files, dirs
+        sys.exit(f'argon apk 素材缺失: {missing}（应放在 {ARGON_APK_DIR}）')
+    total = sum((ARGON_APK_DIR / n).stat().st_size for n in ARGON_APKS)
+    log(f'argon apk 素材就绪: {len(ARGON_APKS)} apk + {ARGON_FIRSTBOOT} ({total} bytes)')
+    return ARGON_APK_DIR
 
 
-def integrate_rootfs(rootfs_tgz, argon_files, argon_dirs, out_tgz):
-    """官方 rootfs + argon 文件 + 中文配置 -> 新 tar.gz。逐 member 复制保留属性。"""
+def integrate_rootfs(rootfs_tgz, argon_dir, out_tgz):
+    """官方 rootfs + argon apk 注册 + 中文配置 -> 新 tar.gz。逐 member 复制保留属性。
+    argon 以 apk 形式放入 /usr/share/mu300-argon/ + 首启脚本 /etc/uci-defaults/95-mu300-argon，
+    可随 apk upgrade 更新；luci 默认配置仍改为中文 + argon 主题（开箱即用）。"""
     tin = tarfile.open(rootfs_tgz, 'r:gz')
     tout = tarfile.open(out_tgz, 'w:gz', format=tarfile.GNU_FORMAT)
     try:
@@ -431,28 +396,24 @@ def integrate_rootfs(rootfs_tgz, argon_files, argon_dirs, out_tgz):
                 tout.addfile(m, tin.extractfile(m))
             else:
                 tout.addfile(m)
-        # 新增 argon 文件（保留 ipk 内 mode/uid/gid/mtime）
-        for rel in sorted(ARGON_DIRS):
-            if rel and rel not in added:
-                ti = tarfile.TarInfo(rel)
-                ti.type = tarfile.DIRTYPE
-                ti.mode = 0o755
-                ti.uid = ti.gid = 0
-                tout.addfile(ti)
-        for rel in ARGON_FILES:
-            data, meta = argon_files[rel]
+        # 新增 argon apk + 首启脚本（保留 mtime/mode，owner root）
+        for rel, src in (
+            (f'usr/share/mu300-argon/{n}', ARGON_APK_DIR / n) for n in ARGON_APKS
+        ):
+            data = src.read_bytes()
             ti = tarfile.TarInfo(rel)
-            if data.startswith(b'LINK:'):
-                ti.type = tarfile.SYMTYPE
-                ti.linkname = data[5:].decode()
-                tout.addfile(ti)
-                continue
             ti.size = len(data)
-            ti.mode = meta.mode & 0o7777
-            ti.uid = meta.uid
-            ti.gid = meta.gid
-            ti.mtime = meta.mtime
+            ti.mode = 0o644
+            ti.uid = ti.gid = 0
+            ti.mtime = 0
             tout.addfile(ti, io.BytesIO(data))
+        script = ARGON_FIRSTBOOT_CONTENT
+        ti = tarfile.TarInfo(f'etc/uci-defaults/{ARGON_FIRSTBOOT}')
+        ti.size = len(script)
+        ti.mode = 0o755
+        ti.uid = ti.gid = 0
+        ti.mtime = 0
+        tout.addfile(ti, io.BytesIO(script))
     finally:
         tin.close()
         tout.close()
@@ -557,7 +518,27 @@ def audit(zip_path, tf=False):
             raw = z.read(lf_path)
             if b'\r\n' in raw:
                 sys.exit(f'审计失败: {lf_path} 含 CRLF 换行（安装脚本会读坏版本号）')
-    log(f'审计通过: {zip_path.name} ({len(want)} 条目, payload store, 白名单/need_for/android-boot-image OK)')
+        # 安装器级校验：manifest 中的资产名与 SHA256 必须与实际 payload 完全一致，
+        # 否则安装脚本校验会报"zip 不完整或损坏"中止
+        kv = {}
+        for line in manifest.splitlines():
+            if '=' in line:
+                k, v = line.split('=', 1)
+                kv[k.strip()] = v.strip()
+        for key, asset in (('KERNEL_ASSET', KERNEL_ASSET), ('ROOTFS_ASSET', ROOTFS_ASSET)):
+            if kv.get(key) != asset:
+                sys.exit(f'审计失败: manifest {key}={kv.get(key)!r} != 实际 {asset}')
+        for key, asset in (('SHA256_KERNEL', 'payload/' + KERNEL_ASSET),
+                           ('SHA256_ROOTFS', 'payload/' + ROOTFS_ASSET)):
+            actual = hashlib.sha256(z.read(asset)).hexdigest()
+            if kv.get(key) != actual:
+                sys.exit(f'审计失败: manifest {key} 与 payload 实际哈希不一致（安装校验必挂）')
+        if not kv.get('TAG') or '\r' in kv['TAG']:
+            sys.exit('审计失败: manifest TAG 缺失或带 \\r')
+        if kv.get('SYSTEM') != SYSTEM:
+            sys.exit(f'审计失败: manifest SYSTEM={kv.get("SYSTEM")!r} != {SYSTEM}')
+    log(f'审计通过: {zip_path.name} ({len(want)} 条目, payload store, '
+        f'白名单/need_for/android-boot-image/LF/manifest校验 OK)')
 
 
 def main():
@@ -609,12 +590,12 @@ def build_once(args, tag, published):
     (src_dir / 'android' / 'magisk' / 'installer' / 'mu300-install.sh.patched').write_bytes(patched_i)
     (src_dir / 'tools' / 'android-boot-image.sh.patched').write_bytes(patched_abi)
 
-    # argon 集成 rootfs
-    argon_files, argon_dirs = ensure_argon()
+    # argon 集成 rootfs（apk 注册 + 默认中文/argon 配置）
+    argon_dir = ensure_argon()
     rootfs_payload = OUT / tag / ('payload-' + ROOTFS_ASSET)
     (OUT / tag).mkdir(parents=True, exist_ok=True)
-    integrate_rootfs(rel_dir / ROOTFS_ASSET, argon_files, argon_dirs, rootfs_payload)
-    log(f'argon+中文 rootfs: {rootfs_payload.name} (sha256 {sha256_file(rootfs_payload)[:16]}…)')
+    integrate_rootfs(rel_dir / ROOTFS_ASSET, argon_dir, rootfs_payload)
+    log(f'argon-apk+中文 rootfs: {rootfs_payload.name} (sha256 {sha256_file(rootfs_payload)[:16]}…)')
 
     # code: tag 数字前 9 位
     code = ''.join(c for c in tag if c.isdigit())[:9] or 1
@@ -639,7 +620,7 @@ def build_once(args, tag, published):
     report = {
         'tag': tag, 'published': published, 'system': SYSTEM, 'kernel': KERNEL,
         'rootfs': ROOTFS_ASSET, 'assets_sha256_verified': True,
-        'argon_files_integrated': len(ARGON_FILES),
+        'argon_apks': ARGON_APKS, 'argon_firstboot': ARGON_FIRSTBOOT,
         'zips': [{ 'name': p.name, 'sha256': sha256_file(p), 'bytes': p.stat().st_size }
                  for p in sorted((OUT / tag).glob('mu300-magisk-*.zip'))],
     }
