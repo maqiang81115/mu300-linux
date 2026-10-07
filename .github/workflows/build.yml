@@ -60,5 +60,5 @@ jobs:
           zips=(work/out/${tag}/mu300-magisk-*.zip)
           gh release create "${tag}" --repo "${GITHUB_REPOSITORY}" \
             --title "MU300 Linux ${tag} TF deploy (argon+zh)" \
-            --notes "Auto cloud build: official ${tag} assets + openwrt-luci + kernel 7.2 + argon theme + Chinese + TF card config. SHA256 in SHA256SUMS-magisk." \
+            --notes "自动云编译固件：官方 v${tag} 资产 + openwrt-luci + 7.2 内核 + Argon 主题 + 中文界面 + TF 卡部署配置。校验值见 SHA256SUMS-magisk。" \
             "${zips[@]}" work/out/${tag}/SHA256SUMS-magisk
