@@ -1,0 +1,64 @@
+name: build-tf-firmware
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths: [ 'build_all.py', '.github/workflows/build.yml' ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect latest upstream tag
+        id: tag
+        run: |
+          loc=$(curl -sI https://github.com/dikeckaan/mu300-linux/releases/latest | tr -d '\r' | grep -i '^location:' | awk '{print $2}')
+          tag=${loc##*/}
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "upstream latest: ${tag}"
+
+      - name: Skip if already built
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.tag.outputs.tag }}"
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "already built ${tag}, skip (follow upstream: build only on new version)"
+            exit 0
+          fi
+          echo "new version ${tag}, start cloud build"
+
+      - name: Run builder
+        env:
+          MU300_PROXY: ''
+        run: |
+          python3 build_all.py --tag "${{ steps.tag.outputs.tag }}"
+          find work/out -name '*.zip' -o -name 'SHA256SUMS-magisk' | sort
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mu300-magisk-${{ steps.tag.outputs.tag }}
+          path: |
+            work/out/*/*.zip
+            work/out/*/SHA256SUMS-magisk
+          if-no-files-found: error
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.tag.outputs.tag }}"
+          zips=(work/out/${tag}/mu300-magisk-*.zip)
+          gh release create "${tag}" --repo "${GITHUB_REPOSITORY}" \
+            --title "MU300 Linux ${tag} TF deploy (argon+zh)" \
+            --notes "Auto cloud build: official ${tag} assets + openwrt-luci + kernel 7.2 + argon theme + Chinese + TF card config. SHA256 in SHA256SUMS-magisk." \
+            "${zips[@]}" work/out/${tag}/SHA256SUMS-magisk
