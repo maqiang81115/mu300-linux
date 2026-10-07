@@ -1,0 +1,15 @@
+#!/bin/sh
+# Argon theme (jerrykuku/luci-theme-argon v2.4.7), installed offline from the bundled packages.
+# Selected once on the first install; after an update (fresh rootfs, kept /etc/config) it is reinstalled,
+# and the user's own theme choice is never overwritten.
+[ -d /www/luci-static/argon ] || apk add --allow-untrusted --no-network /usr/share/mu300-argon/*.apk >/tmp/mu300-argon.log 2>&1
+[ -d /www/luci-static/argon ] || exit 0
+if [ "$(uci -q get luci.mu300.argon)" != 1 ]; then
+    uci -q batch <<UCI
+set luci.main.mediaurlbase='/luci-static/argon'
+set luci.mu300=mu300
+set luci.mu300.argon='1'
+UCI
+    uci commit luci
+fi
+exit 0
