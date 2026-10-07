@@ -479,7 +479,7 @@ def make_stage(tag, code, rel_dir, src_dir, rootfs_payload, tf=False):
     tpl = (I / 'module.prop.in').read_text(encoding='utf-8')
     (st / 'module.prop').write_text(
         tpl.replace('@TAG@', tag).replace('@CODE@', str(code)).replace('@SYSTEM@', SYSTEM).replace('@KERNEL@', KERNEL),
-        encoding='utf-8')
+        encoding='utf-8', newline='\n')
     shutil.copyfile(I / 'customize.sh', st / 'customize.sh')
     shutil.copyfile(M / 'action.sh', st / 'action.sh')
     shutil.copyfile(M / 'switch.sh', st / 'switch.sh')
@@ -501,11 +501,11 @@ def make_stage(tag, code, rel_dir, src_dir, rootfs_payload, tf=False):
         (st / 'mu300' / 'busybox').write_bytes(tark.extractfile(m).read())
     shutil.copyfile(rel_dir / KERNEL_ASSET, st / 'payload' / KERNEL_ASSET)
     shutil.copyfile(rootfs_payload, st / 'payload' / ROOTFS_ASSET)
-    # manifest
+    # manifest（必须 LF，CRLF 会让安装脚本把版本号读成带 \r）
     (st / 'mu300' / 'manifest').write_text(
         'TAG=%s\nSYSTEM=%s\nOS=%s\nUBUNTU=\nKERNEL=%s\nKERNEL_ASSET=%s\nROOTFS_ASSET=%s\nSHA256_KERNEL=%s\nSHA256_ROOTFS=%s\n'
         % (tag, SYSTEM, OS, KERNEL, KERNEL_ASSET, ROOTFS_ASSET,
-           sha256_file(rel_dir / KERNEL_ASSET), sha256_file(rootfs_payload)), encoding='utf-8')
+           sha256_file(rel_dir / KERNEL_ASSET), sha256_file(rootfs_payload)), encoding='utf-8', newline='\n')
     if tf:
         (st / 'mu300' / 'mu300-install.conf').write_bytes(TF_CONF)
     return st
@@ -521,13 +521,17 @@ def build_zip(stage_dir, out_zip, tag):
                 full = os.path.join(root, f)
                 rel = os.path.relpath(full, stage_dir).replace('\\', '/')
                 zi = zipfile.ZipInfo(rel, date_time=(yy, mm, dd, 0, 0, 0))
+                data = Path(full).read_bytes()
+                # 文本文件强制 LF：CRLF 会让安装脚本把 manifest/module.prop 读成带 \r 的值
+                if rel in ('module.prop', 'mu300/manifest'):
+                    data = data.replace(b'\r\n', b'\n')
                 if rel.startswith('payload/'):
                     zi.compress_type = zipfile.ZIP_STORED
-                    z.writestr(zi, Path(full).read_bytes())
+                    z.writestr(zi, data)
                 else:
                     zi.compress_type = zipfile.ZIP_DEFLATED
                     zi._compresslevel = 9
-                    z.writestr(zi, Path(full).read_bytes())
+                    z.writestr(zi, data)
     log(f'打包完成: {out_zip.name} ({out_zip.stat().st_size} bytes)')
 
 
@@ -549,6 +553,10 @@ def audit(zip_path, tf=False):
             sys.exit('审计失败: install.sh need_for 缺 openwrt-luci 分支')
         if PATCH_FW_LINE.decode() not in abi:
             sys.exit('审计失败: android-boot-image.sh 缺 openwrt-luci 固件目录分支')
+        for lf_path in ('mu300/manifest', 'module.prop'):
+            raw = z.read(lf_path)
+            if b'\r\n' in raw:
+                sys.exit(f'审计失败: {lf_path} 含 CRLF 换行（安装脚本会读坏版本号）')
     log(f'审计通过: {zip_path.name} ({len(want)} 条目, payload store, 白名单/need_for/android-boot-image OK)')
 
 
