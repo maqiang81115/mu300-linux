@@ -364,8 +364,21 @@ def ensure_argon():
     return ARGON_APK_DIR
 
 
+def patch_distfeeds(data):
+    """注释掉软件源中的 kmods 行：官方 distfeeds 指向 25.12.5 的 6.12.94 内核模块，
+    与本包 7.2 内核不匹配（上游 build-rootfs.sh 明示 6.12 kmods 在本机无用、主内核已内置）。
+    注释后 apk upgrade / LuCI 不会再装到加载不了的内核模块；用户态源保留不动。"""
+    out = []
+    for line in data.splitlines(keepends=True):
+        if b'kmods/' in line and not line.lstrip().startswith(b'#'):
+            out.append(b'#' + line)
+        else:
+            out.append(line)
+    return b''.join(out)
+
+
 def integrate_rootfs(rootfs_tgz, argon_dir, out_tgz):
-    """官方 rootfs + argon apk 注册 + 中文配置 -> 新 tar.gz。逐 member 复制保留属性。
+    """官方 rootfs + argon apk 注册 + 中文配置 + kmod 源安全化 -> 新 tar.gz。逐 member 复制保留属性。
     argon 以 apk 形式放入 /usr/share/mu300-argon/ + 首启脚本 /etc/uci-defaults/95-mu300-argon，
     可随 apk upgrade 更新；luci 默认配置仍改为中文 + argon 主题（开箱即用）。"""
     tin = tarfile.open(rootfs_tgz, 'r:gz')
@@ -391,6 +404,13 @@ def integrate_rootfs(rootfs_tgz, argon_dir, out_tgz):
                 nm.size = len(data)
                 tout.addfile(nm, io.BytesIO(data))
                 added.add('etc/config/luci')
+                continue
+            if m.isreg() and rel == 'etc/apk/repositories.d/distfeeds.list':
+                data = patch_distfeeds(tin.extractfile(m).read())
+                nm = m
+                nm.size = len(data)
+                tout.addfile(nm, io.BytesIO(data))
+                added.add('etc/apk/repositories.d/distfeeds.list')
                 continue
             if m.isreg():
                 tout.addfile(m, tin.extractfile(m))
@@ -537,8 +557,23 @@ def audit(zip_path, tf=False):
             sys.exit('审计失败: manifest TAG 缺失或带 \\r')
         if kv.get('SYSTEM') != SYSTEM:
             sys.exit(f'审计失败: manifest SYSTEM={kv.get("SYSTEM")!r} != {SYSTEM}')
+        # kmod 源校验：rootfs 软件源不得残留未注释的 6.12 kmod 行（与 7.2 内核不匹配）
+        rt = tarfile.open(fileobj=io.BytesIO(z.read('payload/' + ROOTFS_ASSET)), mode='r:gz')
+        dfs = b''
+        try:
+            for m2 in rt.getmembers():
+                if m2.isfile() and m2.name.lstrip('./') == 'etc/apk/repositories.d/distfeeds.list':
+                    dfs = rt.extractfile(m2).read()
+                    break
+        finally:
+            rt.close()
+        if not dfs:
+            sys.exit('审计失败: rootfs 缺 distfeeds.list')
+        for line in dfs.splitlines():
+            if b'kmods/' in line and not line.lstrip().startswith(b'#'):
+                sys.exit('审计失败: distfeeds.list 残留未注释的 6.12 kmod 源（会装不匹配的内核模块）')
     log(f'审计通过: {zip_path.name} ({len(want)} 条目, payload store, '
-        f'白名单/need_for/android-boot-image/LF/manifest校验 OK)')
+        f'白名单/need_for/android-boot-image/LF/manifest校验/kmod源 OK)')
 
 
 def main():
